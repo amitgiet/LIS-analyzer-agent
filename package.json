@@ -1,0 +1,30 @@
+{
+  "name": "lis-client-agent",
+  "version": "1.0.0",
+  "description": "Client agent for forwarding instrument data from COM/TCP ports to central LIS server",
+  "main": "src/agent.js",
+  "scripts": {
+    "start": "node src/agent.js",
+    "install-service": "node scripts/install-service.js",
+    "uninstall-service": "node scripts/uninstall-service.js"
+  },
+  "keywords": [
+    "lis",
+    "laboratory",
+    "integration",
+    "astm",
+    "hl7"
+  ],
+  "author": "LIS Team",
+  "license": "MIT",
+  "dependencies": {
+    "serialport": "^12.0.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.0.0",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "node-windows": "^1.1.4"
+  }
+}
+

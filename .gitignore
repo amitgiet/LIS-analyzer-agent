@@ -1,0 +1,12 @@
+node_modules/
+logs/
+*.log
+data/
+.env
+.DS_Store
+.vscode/
+.idea/
+*.exe
+*.deb
+*.rpm
+

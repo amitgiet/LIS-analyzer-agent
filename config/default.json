@@ -1,0 +1,54 @@
+{
+  "server": {
+    "url": "http://localhost:3000",
+    "endpoints": {
+      "reports": "/api/instruments/results",
+      "heartbeat": "/api/instruments/heartbeat"
+    },
+    "timeout": 30000
+  },
+  "instrument": {
+    "id": "CLIENT_001",
+    "type": "ESR_ANALYZER",
+    "location": "Client Lab"
+  },
+  "connection": {
+    "type": "serial",
+    "serial": {
+      "port": "COM3",
+      "baudRate": 9600,
+      "dataBits": 8,
+      "parity": "none",
+      "stopBits": 1
+    },
+    "tcp": {
+      "host": "localhost",
+      "port": 4000
+    }
+  },
+  "retry": {
+    "maxRetries": 5,
+    "delayMs": 5000,
+    "exponentialBackoff": true
+  },
+  "queue": {
+    "enabled": true,
+    "file": "./data/queue.json",
+    "maxSize": 1000
+  },
+  "logging": {
+    "level": "info",
+    "file": "./logs/agent.log",
+    "maxSize": "10m",
+    "maxFiles": 5
+  },
+  "security": {
+    "apiKey": null,
+    "verifySsl": true
+  },
+  "heartbeat": {
+    "enabled": true,
+    "intervalMs": 60000
+  }
+}
+
