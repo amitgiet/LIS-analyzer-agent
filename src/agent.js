@@ -125,13 +125,13 @@ class LISAgent {
         sampleId: parsedData.sampleId 
       });
 
-      // Add metadata
-      const payload = {
-        instrumentId: this.config.instrument.id,
-        instrumentType: this.config.instrument.type,
-        timestamp: new Date().toISOString(),
-        data: parsedData
-      };
+      // Transform parsed data into backend format
+      const payload = this.transformToBackendFormat(parsedData);
+
+      if (!payload) {
+        this.logger.warn('Failed to transform data to backend format');
+        return;
+      }
 
       // Send to server or queue
       this.sendOrQueue(payload);
@@ -139,6 +139,132 @@ class LISAgent {
     } catch (error) {
       this.logger.error('Error handling data:', error);
     }
+  }
+
+  transformToBackendFormat(parsedData) {
+    try {
+      // Handle HL7 format
+      if (parsedData.recordType === 'HL7') {
+        return this.transformHL7ToBackendFormat(parsedData);
+      }
+
+      // Handle ASTM format
+      if (parsedData.recordType === 'ASTM') {
+        return this.transformASTMToBackendFormat(parsedData);
+      }
+
+      this.logger.warn('Unknown record type:', parsedData.recordType);
+      return null;
+    } catch (error) {
+      this.logger.error('Error transforming to backend format:', error);
+      return null;
+    }
+  }
+
+  transformASTMToBackendFormat(parsedData) {
+    // Extract patient data from records
+    const patientRecord = parsedData.records.find(r => r.type === 'patient');
+    const orderRecord = parsedData.records.find(r => r.type === 'order');
+    const resultRecords = parsedData.records.filter(r => r.type === 'result');
+    const headerRecord = parsedData.records.find(r => r.type === 'header');
+
+    if (!orderRecord || !resultRecords || resultRecords.length === 0) {
+      this.logger.warn('Incomplete ASTM data: missing order or results');
+      return null;
+    }
+
+    // Extract specimen ID with proper fallback
+    const specimenId = orderRecord?.specimenId || parsedData.sampleId || '';
+    
+    if (!specimenId) {
+      this.logger.warn('Missing specimen ID in ASTM message');
+      return null;
+    }
+
+    // Transform to backend expected format
+    const payload = {
+      PracticePatientID: patientRecord?.practiceId || '',
+      LabPatientID: patientRecord?.labId || '',
+      PatientName: patientRecord?.name || '',
+      DOB: patientRecord?.dob || '',
+      Sex: patientRecord?.sex || '',
+      Orders: [{
+        SpecimenID: specimenId,
+        UniversalTestID: orderRecord?.testId || '',
+        Priority: orderRecord?.priority || '',
+        CollectionDate: headerRecord?.timestamp || new Date().toISOString().split('T')[0].replace(/-/g, ''),
+        CollectionTime: new Date().toTimeString().split(' ')[0].replace(/:/g, ''),
+        Results: resultRecords.map(r => ({
+          UniversalTestID: r.testId || '',
+          ResultValue: r.value || '',
+          Unit: r.unit || '',
+          RefRange: r.referenceRange || '',
+          Abnormal: r.flag || '',
+          InstrumentID: this.config.instrument.id
+        }))
+      }]
+    };
+
+    this.logger.debug('Transformed ASTM payload:', { specimenId, resultCount: resultRecords.length });
+    return payload;
+  }
+
+  transformHL7ToBackendFormat(parsedData) {
+    // Extract data from HL7 segments
+    const mshSegment = parsedData.segments.find(s => s.type === 'MSH');
+    const pidSegment = parsedData.segments.find(s => s.type === 'PID');
+    const obrSegment = parsedData.segments.find(s => s.type === 'OBR');
+    const obxSegments = parsedData.segments.filter(s => s.type === 'OBX');
+
+    if (!pidSegment || !obrSegment || obxSegments.length === 0) {
+      this.logger.warn('Incomplete HL7 data: missing required segments');
+      return null;
+    }
+
+    // Extract patient data from PID segment
+    const patientFields = pidSegment.fields || [];
+    const patientName = (patientFields[5] || '').replace('^', ' ').trim();
+    const patientId = patientFields[2] || '';
+    const dob = patientFields[7] || '';
+    const sex = patientFields[8] || '';
+
+    // Extract specimen ID from OBR segment (field 3)
+    const specimenId = obrSegment.fields[3] || '';
+    
+    if (!specimenId) {
+      this.logger.warn('Missing specimen ID in HL7 message');
+      return null;
+    }
+
+    // Transform to backend expected format
+    const payload = {
+      PracticePatientID: patientId.split('^')[0] || '',
+      LabPatientID: patientId || '',
+      PatientName: patientName,
+      DOB: dob || '',
+      Sex: sex || '',
+      Orders: [{
+        SpecimenID: specimenId,
+        UniversalTestID: obrSegment.fields[4] || '',
+        Priority: obrSegment.fields[5] || '',
+        CollectionDate: new Date().toISOString().split('T')[0].replace(/-/g, ''),
+        CollectionTime: new Date().toTimeString().split(' ')[0].replace(/:/g, ''),
+        Results: obxSegments.map(obx => {
+          const fields = obx.fields || [];
+          return {
+            UniversalTestID: fields[3] || '',
+            ResultValue: fields[5] || '',
+            Unit: fields[6] || '',
+            RefRange: fields[5] || '',
+            Abnormal: fields[8] || '',
+            InstrumentID: this.config.instrument.id
+          };
+        })
+      }]
+    };
+
+    this.logger.debug('Transformed HL7 payload:', { specimenId, resultCount: obxSegments.length });
+    return payload;
   }
 
   async sendOrQueue(payload) {
@@ -158,7 +284,8 @@ class LISAgent {
   async sendToServer(payload) {
     try {
       const endpoint = this.config.server.endpoints?.reports || '/api/instruments/results';
-      const response = await this.httpClient.post(endpoint, payload);
+      // Backend expects an array of patient results
+      const response = await this.httpClient.post(endpoint, [payload]);
       this.logger.info('Data sent to server successfully');
       return true;
     } catch (error) {
@@ -177,6 +304,7 @@ class LISAgent {
       };
       const endpoint = this.config.server.endpoints?.heartbeat || '/api/instruments/heartbeat';
       await this.httpClient.post(endpoint, status);
+      this.logger.debug('Heartbeat sent successfully');
     } catch (error) {
       this.logger.debug('Heartbeat failed:', error.message);
     }

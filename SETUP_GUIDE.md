@@ -1,49 +1,151 @@
-# Client Agent - Setup Guide
+# LIS Analyzer Agent - Setup & Configuration Guide
 
-Complete guide for deploying the client-agent to connect instruments to path-backend.
+## Overview
 
-## 🎯 **Purpose**
-
-The client-agent runs on a **Windows PC** connected to your lab instrument (via USB/Serial or TCP). It:
-- Reads ASTM/HL7 data from the instrument
-- Converts to JSON format
-- Sends via HTTP to your remote path-backend server
-- Retries automatically if network fails
-- Queues messages when offline
+The LIS Analyzer Agent runs on your local PC to connect instruments (via COM/TCP ports) to your centralized LIS backend. It listens for ASTM/HL7 messages from instruments and forwards them to the backend server.
 
 ---
 
-## 📋 **Prerequisites**
+## Complete Flow
 
-- Windows PC (7/10/11) connected to instrument
-- Node.js 16+ installed
-- Instrument connected via COM port or TCP
-- Network access to your path-backend server
-
----
-
-## 🚀 **Quick Setup (5 Minutes)**
-
-### **Step 1: Copy Agent Files**
-
-Copy `UniversaLIS/client-agent` folder to your lab PC:
-
-```bash
-# On your development machine
-# Copy the entire client-agent folder to USB/Network share
-
-# On lab PC
-# Extract to: C:\Program Files\LIS Agent\
+```
+┌─────────────────────────┐
+│  1. Patient Registered  │ → Backend creates patient record
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 2. Sample Collected    │ → Backend generates unique barcode
+│    with barcode label   │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 3. Test Order Created   │ → Backend links barcode to tests
+│    for sample barcode   │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 4. Sample sent to       │ → Physical sample sent to instrument
+│    instrument           │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 5. Instrument reads     │ → Machine scans barcode, runs tests
+│    barcode & tests      │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 6. Instrument sends     │ → ASTM/HL7 message with results
+│    results via COM/TCP  │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 7. Agent listens on      │ → Agent connected to COM port or TCP
+│    COM/TCP port          │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 8. Agent parses message │ → Converts ASTM/HL7 to structured data
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 9. Agent transforms data│ → Converts to backend format
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 10. Agent sends to       │ → HTTP POST to backend
+│     backend server       │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 11. Backend matches      │ → Finds sample by barcode
+│     by barcode           │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 12. Backend maps tests   │ → Maps instrument test codes
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 13. Backend saves results│ → Inserts into database
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 14. Backend updates      │ → Marks tests as completed
+│     order status         │
+└──────────┬──────────────┘
+           │
+┌──────────▼──────────────┐
+│ 15. Backend sends        │ → WebSocket notification
+│     WebSocket notification│
+└──────────────────────────┘
 ```
 
-### **Step 2: Configure for Your Server**
+---
+
+## Setup Instructions
+
+### 1. Backend Configuration
+
+#### Register Your Instrument
+
+Run this SQL in your backend database:
+
+```sql
+-- Replace with your actual instrument details
+INSERT INTO instruments (
+  instrument_id, 
+  name, 
+  manufacturer, 
+  model, 
+  instrument_type, 
+  connection_type, 
+  status
+) VALUES (
+  'YOUR_INSTRUMENT_ID',     -- Must match agent config
+  'Your Instrument Name',
+  'Manufacturer Name',
+  'Model Number',
+  'hematology',             -- or 'chemistry', 'immunology', etc.
+  'serial',                 -- or 'tcp'
+  'active'
+);
+```
+
+#### Create Test Mappings
+
+Map your instrument's test codes to your internal test catalog:
+
+```sql
+-- Map instrument test code 'ESR' to internal test with ID 1
+INSERT INTO instrument_test_mapping (
+  instrument_id, 
+  instrument_test_code, 
+  test_id
+)
+SELECT 
+  i.id,
+  'ESR',        -- Your instrument test code
+  t.id          -- Your internal test ID
+FROM instruments i, tests t
+WHERE i.instrument_id = 'YOUR_INSTRUMENT_ID'
+AND t.id = 1;    -- Your internal test ID
+```
+
+### 2. Agent Installation
+
+```bash
+cd LIS-analyzer-agent
+npm install
+```
+
+### 3. Agent Configuration
 
 Edit `config/default.json`:
 
 ```json
 {
   "server": {
-    "url": "http://YOUR-REMOTE-SERVER-IP:3000",
+    "url": "http://YOUR_BACKEND_SERVER:3000",
     "endpoints": {
       "reports": "/api/instruments/results",
       "heartbeat": "/api/instruments/heartbeat"
@@ -51,14 +153,14 @@ Edit `config/default.json`:
     "timeout": 30000
   },
   "instrument": {
-    "id": "ESR_ANALYZER_LAB1",
-    "type": "ESR_ANALYZER",
-    "location": "Main Lab"
+    "id": "YOUR_INSTRUMENT_ID",        // Must match database!
+    "type": "YOUR_INSTRUMENT_TYPE",
+    "location": "Lab Name"
   },
   "connection": {
-    "type": "serial",
+    "type": "serial",                   // or "tcp"
     "serial": {
-      "port": "COM3",
+      "port": "COM3",                   // Your COM port
       "baudRate": 9600,
       "dataBits": 8,
       "parity": "none",
@@ -68,379 +170,279 @@ Edit `config/default.json`:
 }
 ```
 
-**Replace:**
-- `YOUR-REMOTE-SERVER-IP` - Your path-backend server IP
-- `COM3` - Your instrument's COM port (check Device Manager)
-- `9600` - Your instrument's baud rate (check instrument manual)
+### 4. Run the Agent
 
-### **Step 3: Install Dependencies**
+#### Development Mode
 
 ```bash
-cd C:\Program Files\LIS Agent\client-agent
-npm install
+npm start
 ```
 
-### **Step 4: Install as Windows Service**
+#### Production Mode (Windows Service)
 
 ```bash
 npm run install-service
 ```
 
-This installs the agent to run automatically on Windows boot.
+The agent will:
+- Connect to your instrument via COM/TCP
+- Listen for ASTM/HL7 messages
+- Parse and forward to backend
+- Retry on failures
+- Send heartbeat every 60 seconds
 
-### **Step 5: Start the Service**
+---
 
-```bash
-net start lis-client-agent
+## Message Format Examples
+
+### ASTM Format (Common)
+
+**Raw Message:**
+```
+H|\^&||||||||
+P|1||12345|SMITH^JOHN||19800515|M||
+O|1|SAMP001|ESR||R
+R|1||^WESTERGREN|15|mm/hr|0-15|N
+L|1|F
 ```
 
-Or start from Services:
-```bash
-services.msc
-# Find "LIS Client Agent"
-# Right-click → Start
+**Parsed to Backend Format:**
+```json
+{
+  "PracticePatientID": "12345",
+  "LabPatientID": "12345",
+  "PatientName": "SMITH JOHN",
+  "DOB": "19800515",
+  "Sex": "M",
+  "Orders": [{
+    "SpecimenID": "SAMP001",
+    "UniversalTestID": "ESR",
+    "Priority": "R",
+    "Results": [{
+      "UniversalTestID": "WESTERGREN",
+      "ResultValue": "15",
+      "Unit": "mm/hr",
+      "RefRange": "0-15",
+      "Abnormal": "N",
+      "InstrumentID": "YOUR_INSTRUMENT_ID"
+    }]
+  }]
+}
+```
+
+### HL7 Format (Alternative)
+
+**Raw Message:**
+```
+MSH|^~\&|INSTRUMENT|LAB|LIS|BACKEND|20240101120000||ORU^R01|12345|P|2.3
+PID|1||12345||SMITH^JOHN||19800515|M
+OBR|1|||SAMP001|ESR|R|||20240101120000
+OBX|1|NM|ESR^WESTERGREN|15|mm/hr|0-15|N|||F
 ```
 
 ---
 
-## 🔧 **Configuration Details**
+## Barcode Matching Logic
 
-### **Server Configuration**
+The backend matches results using this priority:
 
-```json
-"server": {
-  "url": "http://123.45.67.89:3000",  // Your path-backend server
-  "endpoints": {
-    "reports": "/api/instruments/results",
-    "heartbeat": "/api/instruments/heartbeat"
-  },
-  "timeout": 30000  // 30 seconds
-}
+### 1. Exact Barcode Match (Primary)
+```sql
+SELECT * FROM samples 
+WHERE barcode = 'SAMP001' 
+OR external_specimen_id = 'SAMP001'
 ```
 
-### **Instrument Configuration**
-
-```json
-"instrument": {
-  "id": "ESR_ANALYZER_LAB1",        // Unique identifier
-  "type": "ESR_ANALYZER",           // Instrument type
-  "location": "Main Lab"            // Lab location
-}
+### 2. Patient ID Match (Fallback)
+```sql
+SELECT s.* FROM samples s
+JOIN patients p ON s.patient_id = p.id
+WHERE p.patient_id = '12345'
+AND s.status IN ('collected', 'in_process')
 ```
 
-### **Serial Connection (USB/RS-232)**
+### 3. Failure Handling
+- If no match found → Logged to `instrument_result_log` table
+- Status set to `failed`
+- Error message: "No matching sample found"
+- Can be reviewed manually via UI
 
-```json
-"connection": {
-  "type": "serial",
-  "serial": {
-    "port": "COM3",          // Check Device Manager
-    "baudRate": 9600,        // Common: 9600, 115200
-    "dataBits": 8,
-    "parity": "none",
-    "stopBits": 1
-  }
-}
+---
+
+## Multiple Instruments
+
+### Option 1: Separate Agent Instances (Recommended)
+
+Run one agent per instrument on the same PC:
+
+```bash
+# Create separate config files
+config/instrument1.json
+config/instrument2.json
+
+# Run multiple instances
+node src/agent.js --config config/instrument1.json &
+node src/agent.js --config config/instrument2.json &
 ```
 
-**Find COM Port:**
-1. Connect instrument to USB
-2. Open Device Manager
-3. Look under "Ports (COM & LPT)"
-4. Note the COM port (e.g., "COM3")
+### Option 2: Modify Agent for Multiple Ports
 
-### **TCP Connection**
+Modify `agent.js` to support multiple readers:
 
-```json
-"connection": {
-  "type": "tcp",
-  "tcp": {
-    "host": "192.168.1.100",  // Instrument's IP address
-    "port": 4000               // Instrument's TCP port
-  }
-}
-```
+```javascript
+// In constructor
+this.readers = [];
 
-### **Retry Configuration**
-
-```json
-"retry": {
-  "maxRetries": 5,              // Retry 5 times if fails
-  "delayMs": 5000,              // Wait 5 seconds between retries
-  "exponentialBackoff": true   // Increase delay each retry
-}
-```
-
-### **Queue Configuration**
-
-```json
-"queue": {
-  "enabled": true,              // Enable offline queue
-  "file": "./data/queue.json",  // Queue storage file
-  "maxSize": 1000               // Max queued messages
+// In start()
+if (Array.isArray(this.config.connection.serial)) {
+  this.config.connection.serial.forEach(serial => {
+    const reader = new ComReader(serial, this.logger);
+    this.readers.push(reader);
+  });
 }
 ```
 
 ---
 
-## 🧪 **Testing**
+## Troubleshooting
 
-### **Test 1: Check Service is Running**
+### Agent Won't Connect to COM Port
 
-```bash
-net start lis-client-agent
-# Should show: "The LIS Client Agent service was started successfully"
-```
-
-### **Test 2: View Logs**
-
-```bash
-# Logs are in the client-agent folder
-cd C:\Program Files\LIS Agent\client-agent\logs
-type agent.log
-
-# Or tail the log
-powershell Get-Content agent.log -Wait -Tail 20
-```
-
-**Good logs should show:**
-```
-✓ Starting LIS Client Agent...
-✓ Instrument connected successfully
-✓ Agent started successfully
-✓ Heartbeat sent successfully
-```
-
-### **Test 3: Verify Connection to Server**
-
-```bash
-# Test from lab PC
-curl http://YOUR-SERVER-IP:3000/health
-
-# Should return: {"status":"OK",...}
-```
-
-### **Test 4: Run Instrument Test**
-
-Run a test on your instrument. Check logs:
-
-```bash
-# Should see:
-"Received raw data..."
-"Parsed message:"
-"Data sent to server successfully"
-```
-
-### **Test 5: Check Server Received Data**
-
-On your path-backend server:
-
-```bash
-# Check database for incoming results
-mysql> SELECT * FROM instrument_result_log ORDER BY received_at DESC LIMIT 5;
-```
-
----
-
-## 🐛 **Troubleshooting**
-
-### **"COM Port Not Found"**
-
-**Problem:** Instrument COM port incorrect
-
-**Solution:**
-1. Check Device Manager for correct COM port
-2. Update `config/default.json` with correct port
-3. Restart service
-
-### **"Cannot Connect to Server"**
-
-**Problem:** Network issue or server unreachable
-
-**Test:**
-```bash
-# From lab PC
-ping YOUR-SERVER-IP
-telnet YOUR-SERVER-IP 3000
-```
+**Problem:** `COM port not found` error
 
 **Solutions:**
-- Check server firewall allows port 3000
-- Verify server is running
-- Check network connectivity
-- Try using IP instead of domain name
+1. Check Windows Device Manager for correct COM port number
+2. Ensure no other application is using the port
+3. Check USB cable connection
+4. Verify baud rate settings match instrument
 
-### **"Queue Growing Large"**
+### Agent Can't Connect to Backend
 
-**Problem:** Messages not being sent to server
-
-**Check:**
-```bash
-# View queue
-cd client-agent/data
-type queue.json
-```
+**Problem:** `Failed to send to server` error
 
 **Solutions:**
-- Verify server is running
-- Check network connectivity
-- Review logs for errors
-- Clear queue if needed: `del data\queue.json`
+1. Verify backend is running: `curl http://localhost:3000/health`
+2. Check firewall allows outbound HTTP
+3. Verify server URL in config is correct
+4. Check backend logs: `tail -f path-backend/logs/combined.log`
 
-### **"No Data Being Received"**
+### Results Not Matching
 
-**Problem:** Instrument not sending or wrong port
+**Problem:** Backend shows "No matching sample found"
 
-**Check:**
-1. Verify instrument is on and connected
-2. Check COM port in Device Manager
-3. Verify serial settings (baud rate, parity, etc.)
-4. Try different COM ports
+**Solutions:**
+1. Verify barcode in message matches database
+2. Check `instrument_result_log` table for details
+3. Ensure sample status is 'collected' or 'in_process'
+4. Verify `SpecimenID` in agent transformation matches sample barcode
+
+### Test Mapping Not Working
+
+**Problem:** "No test mapping found" error
+
+**Solutions:**
+1. Verify instrument is registered in database
+2. Check `instrument_test_mapping` table has entries
+3. Verify `instrument_test_code` matches exactly
+4. Ensure mapping is active: `is_active = TRUE`
 
 ---
 
-## 🔄 **Updating Configuration**
+## Monitoring
 
-### **Change Server URL**
-
-1. Stop service: `net stop lis-client-agent`
-2. Edit `config/default.json`
-3. Change `server.url` to new address
-4. Start service: `net start lis-client-agent`
-
-### **Change COM Port**
-
-1. Stop service
-2. Edit `config/default.json`
-3. Change `connection.serial.port`
-4. Start service
-
-### **View Current Config**
+### View Agent Logs
 
 ```bash
-cd client-agent
-type config\default.json
+tail -f logs/agent.log
 ```
 
----
+### Check Queue Size
 
-## 📊 **Monitoring**
+Queue file: `data/queue.json`
 
-### **Check Service Status**
+### Backend Logs
 
 ```bash
-net start lis-client-agent
-# Check if running
-
-sc query lis-client-agent
-# Shows detailed service status
+tail -f path-backend/logs/combined.log
 ```
 
-### **View Logs**
+### Database Logs
+
+```sql
+-- Check pending results
+SELECT * FROM instrument_result_log 
+WHERE processed = FALSE 
+ORDER BY received_at DESC;
+
+-- Check matched results
+SELECT * FROM instrument_result_log 
+WHERE processing_status = 'matched' 
+ORDER BY received_at DESC;
+
+-- Check failed results
+SELECT * FROM instrument_result_log 
+WHERE processing_status = 'failed' 
+ORDER BY received_at DESC;
+```
+
+---
+
+## Production Deployment
+
+### 1. Install as Windows Service
 
 ```bash
-cd client-agent\logs
-type agent.log | findstr "ERROR"
-# View only errors
+npm run install-service
 ```
 
-### **Check Queue Size**
+### 2. Monitor with PM2 (Optional)
 
 ```bash
-# Check queue file size
-cd client-agent\data
-dir queue.json
+npm install -g pm2
+pm2 start src/agent.js --name lis-agent
+pm2 logs lis-agent
 ```
 
-### **Monitor Real-Time**
+### 3. Set Up Log Rotation
 
-```bash
-powershell Get-Content C:\Program Files\LIS Agent\client-agent\logs\agent.log -Wait -Tail 50
-```
+Already configured in `config/default.json`:
+- Max file size: 10MB
+- Max files: 5
+- Auto-rotation enabled
 
 ---
 
-## 🛡️ **Security Notes**
+## Security Considerations
 
-### **Production Checklist**
+1. **API Authentication:** Backend endpoint is currently public
+   - Consider adding API key authentication
+   - Update `HttpClient.js` to send API key in headers
 
-- [ ] Use HTTPS (SSL certificate) for server URL
-- [ ] Add API key authentication
-- [ ] Configure Windows Firewall
-- [ ] Enable Windows automatic updates
-- [ ] Set strong service account password
-- [ ] Backup configuration files
+2. **Network Security:** 
+   - Use HTTPS in production
+   - Set `verifySsl: true` in config
 
-### **Enable HTTPS**
-
-```json
-"server": {
-  "url": "https://your-server.com",  // Use HTTPS
-  "security": {
-    "verifySsl": true                // Verify SSL certificate
-  }
-}
-```
-
-### **Add API Key**
-
-```json
-"security": {
-  "apiKey": "your-secret-key-here",
-  "verifySsl": true
-}
-```
-
-Then configure path-backend to require this API key.
+3. **Firewall Rules:**
+   - Allow agent → backend (outbound port 3000)
+   - Block instrument → internet (isolate network)
 
 ---
 
-## 📝 **Log Locations**
+## Success Indicators
 
-- **Agent Log:** `logs/agent.log`
-- **Queue File:** `data/queue.json`
-- **Service Logs:** Windows Event Viewer → Application Log
-
----
-
-## 🔄 **Uninstall**
-
-```bash
-# Uninstall service
-npm run uninstall-service
-
-# Or manual uninstall
-sc delete lis-client-agent
-```
+✅ Agent logs: "Instrument connected successfully"  
+✅ Heartbeat logs: "Heartbeat sent successfully"  
+✅ Backend logs: "Results processed: X matched"  
+✅ Database: `instrument_result_log.processing_status = 'matched'`  
+✅ Web UI: Results appear in patient reports  
 
 ---
 
-## ✅ **Success Indicators**
+## Support
 
-**Service is working when you see:**
-
-✅ Service running: `sc query lis-client-agent` shows "RUNNING"  
-✅ Logs show: "Instrument connected successfully"  
-✅ Logs show: "Data sent to server successfully"  
-✅ Server receives data in `instrument_result_log` table  
-✅ No errors in logs  
-
----
-
-## 📞 **Support**
-
-**Check logs first:**
-```bash
-type logs\agent.log
-```
-
-**Common issues:**
-- COM port issues → Check Device Manager
-- Network issues → Test with ping/telnet
-- Server issues → Check server logs
-
----
-
-**Version:** 1.0.0  
-**Last Updated:** October 2024
+For issues:
+1. Check logs in `./logs/agent.log`
+2. Check queue in `./data/queue.json`
+3. Check backend logs
+4. Check database `instrument_result_log` table
 

@@ -1,6 +1,7 @@
 {
   "server": {
     "url": "http://localhost:3000",
+    "_comment": "Update this URL to your backend server address",
     "endpoints": {
       "reports": "/api/instruments/results",
       "heartbeat": "/api/instruments/heartbeat"
@@ -9,6 +10,7 @@
   },
   "instrument": {
     "id": "CLIENT_001",
+    "_comment": "This ID must match the instrument_id in your backend database",
     "type": "ESR_ANALYZER",
     "location": "Client Lab"
   },
@@ -49,6 +51,12 @@
   "heartbeat": {
     "enabled": true,
     "intervalMs": 60000
+  },
+  "autodetect": {
+    "serialBaudRates": [9600, 19200, 38400],
+    "serialListenMs": 10000,
+    "tcpTimeoutMs": 5000,
+    "tcpTargets": []
   }
 }
 
