@@ -1,6 +1,8 @@
 const path = require('path');
 const dotenv = require('dotenv');
 const winston = require('winston');
+const io = require('socket.io-client');
+const { SerialPort } = require('serialport');
 const ComReader = require('./lib/ComReader');
 const TcpReader = require('./lib/TcpReader');
 const MessageParser = require('./lib/MessageParser');
@@ -24,6 +26,9 @@ class LISAgent {
     this.queueManager = new QueueManager(config, this.logger);
     this.heartbeat = new Heartbeat(config, this.logger);
     this.isRunning = false;
+    this.socket = null;
+    this.portMonitorInterval = null;
+    this.lastKnownPorts = [];
   }
 
   setupLogger() {
@@ -78,6 +83,7 @@ class LISAgent {
 
       this.reader.on('disconnect', () => {
         this.logger.warn('Instrument disconnected');
+        this.emitDeviceStatus(); // Update backend with disconnection
         this.attemptReconnect();
       });
 
@@ -85,6 +91,7 @@ class LISAgent {
       await this.reader.connect();
       
       this.logger.info('Instrument connected successfully');
+      this.emitDeviceStatus(); // Update backend with connection status
 
       // Start queue processor
       this.queueManager.start(async (data) => {
@@ -99,6 +106,12 @@ class LISAgent {
       // Start processing queued items
       this.processQueue();
 
+      // Connect to backend Socket.IO for real-time updates
+      this.connectToSocketServer();
+      
+      // Start monitoring for newly plugged devices
+      this.startPortMonitoring();
+
       this.isRunning = true;
       this.logger.info('Agent started successfully');
 
@@ -108,9 +121,117 @@ class LISAgent {
     }
   }
 
+  connectToSocketServer() {
+    const socketUrl = this.config.server.url || 'http://localhost:3000';
+    this.socket = io(socketUrl, {
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: Infinity
+    });
+
+    this.socket.on('connect', () => {
+      this.logger.info('Connected to backend Socket.IO server');
+      this.emitDeviceStatus();
+    });
+
+    this.socket.on('disconnect', () => {
+      this.logger.warn('Disconnected from backend Socket.IO server');
+    });
+  }
+
+  async startPortMonitoring() {
+    if (this.portMonitorInterval) return;
+    
+    // Get initial port list
+    try {
+      const ports = await SerialPort.list();
+      this.lastKnownPorts = ports.map(p => p.path || p.comName);
+      this.logger.info(`Monitoring ${this.lastKnownPorts.length} serial ports for hot-plug events`);
+    } catch (error) {
+      this.logger.error('Failed to enumerate ports for monitoring:', error);
+    }
+    
+    this.portMonitorInterval = setInterval(async () => {
+      try {
+        const currentPorts = await SerialPort.list();
+        const currentPortPaths = currentPorts.map(p => p.path || p.comName);
+        
+        // Check for newly added ports
+        for (const portPath of currentPortPaths) {
+          if (!this.lastKnownPorts.includes(portPath)) {
+            this.logger.info(`🔌 New device detected on: ${portPath}`);
+            this.lastKnownPorts.push(portPath);
+            await this.handleNewDeviceDetected(portPath);
+          }
+        }
+        
+        // Check for removed ports
+        for (const prevPort of this.lastKnownPorts) {
+          if (!currentPortPaths.includes(prevPort) && prevPort !== this.config.connection.serial.port) {
+            this.logger.info(`🔌 Device removed from: ${prevPort}`);
+            const idx = this.lastKnownPorts.indexOf(prevPort);
+            if (idx > -1) this.lastKnownPorts.splice(idx, 1);
+            await this.handleDeviceRemoved(prevPort);
+          }
+        }
+      } catch (error) {
+        this.logger.error('Port monitoring error:', error);
+      }
+    }, 5000); // Check every 5 seconds
+  }
+
+  async handleNewDeviceDetected(portPath) {
+    const deviceInfo = {
+      type: 'serial',
+      port: portPath,
+      status: 'connected',
+      detectedAt: new Date().toISOString(),
+      instrumentId: this.config.instrument.id
+    };
+    
+    // Emit to backend via Socket.IO
+    if (this.socket && this.socket.connected) {
+      this.socket.emit('device-status', deviceInfo);
+      this.logger.info('Emitted device connect event to backend');
+    }
+  }
+
+  async handleDeviceRemoved(portPath) {
+    const deviceInfo = {
+      type: 'serial',
+      port: portPath,
+      status: 'disconnected',
+      disconnectedAt: new Date().toISOString(),
+      instrumentId: this.config.instrument.id
+    };
+    
+    // Emit to backend via Socket.IO
+    if (this.socket && this.socket.connected) {
+      this.socket.emit('device-status', deviceInfo);
+      this.logger.info('Emitted device disconnect event to backend');
+    }
+  }
+
+  emitDeviceStatus() {
+    if (!this.socket || !this.socket.connected) return;
+    
+    const status = {
+      instrumentId: this.config.instrument.id,
+      instrumentType: this.config.instrument.type,
+      connectionType: this.config.connection.type,
+      status: this.reader && this.reader.isConnected ? 'connected' : 'disconnected',
+      timestamp: new Date().toISOString()
+    };
+    
+    this.socket.emit('agent-status', status);
+    this.logger.debug('Emitted agent status to backend');
+  }
+
   handleData(rawData) {
     try {
-      this.logger.debug('Received raw data:', { size: rawData.length });
+      this.logger.info('Received data from instrument', { 
+        size: rawData.length
+      });
 
       // Parse the message
       const parsedData = this.parser.parse(rawData);
@@ -120,9 +241,9 @@ class LISAgent {
         return;
       }
 
-      this.logger.info('Parsed message:', { 
+      this.logger.info('Parsed message', { 
         recordType: parsedData.recordType,
-        sampleId: parsedData.sampleId 
+        sampleId: parsedData.sampleId
       });
 
       // Transform parsed data into backend format
@@ -284,6 +405,9 @@ class LISAgent {
   async sendToServer(payload) {
     try {
       const endpoint = this.config.server.endpoints?.reports || '/api/instruments/results';
+      this.logger.info('Sending data to backend server', {
+        specimenId: payload.Orders?.[0]?.SpecimenID
+      });
       // Backend expects an array of patient results
       const response = await this.httpClient.post(endpoint, [payload]);
       this.logger.info('Data sent to server successfully');
@@ -329,6 +453,17 @@ class LISAgent {
   async stop() {
     this.logger.info('Stopping agent...');
     this.isRunning = false;
+    
+    // Stop port monitoring
+    if (this.portMonitorInterval) {
+      clearInterval(this.portMonitorInterval);
+      this.portMonitorInterval = null;
+    }
+    
+    // Disconnect Socket.IO
+    if (this.socket) {
+      this.socket.disconnect();
+    }
     
     if (this.reader) {
       await this.reader.disconnect();

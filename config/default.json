@@ -15,17 +15,24 @@
     "location": "Client Lab"
   },
   "connection": {
-    "type": "serial",
+    "type": "tcp",
+    "_comment": "Protocol handler enabled by default for proper ASTM ENQ/ACK/NAK handling",
+    "useProtocolHandler": true,
+    "alarmTime": 10000,
     "serial": {
       "port": "COM3",
       "baudRate": 9600,
       "dataBits": 8,
       "parity": "none",
-      "stopBits": 1
+      "stopBits": 1,
+      "useProtocolHandler": true,
+      "alarmTime": 10000
     },
     "tcp": {
       "host": "localhost",
-      "port": 4000
+      "port": 4000,
+      "useProtocolHandler": true,
+      "alarmTime": 10000
     }
   },
   "retry": {
@@ -53,9 +60,12 @@
     "intervalMs": 60000
   },
   "autodetect": {
+    "_comment": "AutoDetection configuration for parallel scanning",
     "serialBaudRates": [9600, 19200, 38400],
-    "serialListenMs": 10000,
+    "serialListenMs": 15000,
     "tcpTimeoutMs": 5000,
+    "maxConcurrent": 5,
+    "adaptiveListen": true,
     "tcpTargets": []
   }
 }

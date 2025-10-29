@@ -3,6 +3,90 @@ class MessageParser {
     this.logger = logger;
   }
 
+  /**
+   * Calculate ASTM checksum for a buffer
+   * Checksum includes all bytes from STX (not including STX) to ETX/ETB
+   * @param {Buffer} data - Buffer containing ASTM frame data
+   * @returns {number} Checksum value (0-255)
+   */
+  calculateChecksum(data) {
+    let checksum = 0;
+    let startCounting = false;
+    
+    for (const byte of data) {
+      if (byte === 0x02) { // STX
+        startCounting = true;
+        continue; // STX is NOT included in checksum
+      }
+      
+      if (startCounting) {
+        checksum = (checksum + byte) % 256;
+      }
+      
+      if (byte === 0x03 || byte === 0x17) { // ETX or ETB
+        startCounting = false;
+        // ETX/ETB ARE included in checksum
+      }
+    }
+    
+    return checksum;
+  }
+
+  /**
+   * Validate checksum in ASTM message
+   * @param {string} message - Complete ASTM message
+   * @returns {boolean} True if checksum is valid
+   */
+  validateASTMChecksum(message) {
+    try {
+      // Extract checksum from message (2 hex digits after ETX/ETB, before CR)
+      // Format: ...ETX<checksum>CRLF
+      const etxIndex = message.lastIndexOf('\x03');
+      const etbIndex = message.lastIndexOf('\x17');
+      
+      let frameEndIndex = -1;
+      if (etxIndex > etbIndex) {
+        frameEndIndex = etxIndex;
+      } else if (etbIndex > -1) {
+        frameEndIndex = etbIndex;
+      }
+      
+      if (frameEndIndex === -1) {
+        this.logger.warn('No ETX or ETB found in message');
+        return false;
+      }
+      
+      // Extract checksum (2 hex characters after ETX/ETB)
+      const checksumStart = frameEndIndex + 1;
+      const checksumEnd = checksumStart + 2;
+      
+      if (checksumEnd > message.length) {
+        this.logger.warn('Checksum not found in message');
+        return false;
+      }
+      
+      const receivedChecksum = message.substring(checksumStart, checksumEnd).toUpperCase();
+      
+      // Calculate checksum for the frame
+      const frameData = Buffer.from(message.substring(0, frameEndIndex + 1), 'binary');
+      const calculatedChecksum = this.calculateChecksum(frameData);
+      const calculatedHex = calculatedChecksum.toString(16).toUpperCase().padStart(2, '0');
+      
+      const isValid = calculatedHex === receivedChecksum;
+      
+      if (!isValid) {
+        this.logger.warn(
+          `ASTM checksum mismatch: calculated=${calculatedHex}, received=${receivedChecksum}`
+        );
+      }
+      
+      return isValid;
+    } catch (error) {
+      this.logger.error('Error validating ASTM checksum:', error);
+      return false;
+    }
+  }
+
   parse(rawMessage) {
     try {
       // Detect message format
@@ -21,9 +105,9 @@ class MessageParser {
   }
 
   isASTM(message) {
-    // ASTM messages typically start with STX (0x02) or have specific record types (H, P, O, R, L)
+    // ASTM messages typically start with STX (0x02) or with record types H|, P|, O|, R|, L|
     return message.startsWith('\x02') || 
-           /^[H|P|O|R|L]\|/.test(message.trim());
+           /^[HPORL]\|/.test(message.trim());
   }
 
   isHL7(message) {
@@ -34,6 +118,13 @@ class MessageParser {
 
   parseASTM(rawMessage) {
     try {
+      // Validate checksum if present
+      const hasChecksum = rawMessage.includes('\x03') || rawMessage.includes('\x17');
+      if (hasChecksum && !this.validateASTMChecksum(rawMessage)) {
+        this.logger.warn('ASTM message checksum validation failed');
+        // Continue parsing anyway, but log warning
+      }
+
       // Remove STX/ETX wrappers
       let message = rawMessage;
       if (message.startsWith('\x02')) {
@@ -43,14 +134,37 @@ class MessageParser {
         message = message.substring(0, message.length - 1);
       }
 
-      const lines = message.split(/\r?\n/).filter(line => line.trim());
-      const records = [];
+      // Remove checksum (2 hex digits after ETX/ETB and before CR)
+      // This is already handled in validation, but clean it up for parsing
+      message = message.replace(/\x03[0-9A-Fa-f]{2}\x0D/g, '\x03\x0D');
+      message = message.replace(/\x17[0-9A-Fa-f]{2}\x0D/g, '\x17\x0D');
 
+      // ASTM messages use \r (carriage return) as line separator
+      const lines = message.split(/\r/).filter(line => line.trim());
+      const records = [];
+      
       for (const line of lines) {
-        if (line.length < 4 || line[0] !== '|') continue;
+        const trimmed = line.trim();
+        if (trimmed.length < 2) continue;
         
-        const recordType = line[1];
-        const fields = line.split('|');
+        const fields = trimmed.split('|');
+        
+        // Extract record type from the first field
+        // Format can be "1H|..." (sequence + record type) or "P|..." (just record type)
+        let recordType;
+        const firstField = fields[0];
+        
+        if (/^\d+[HPORL]$/.test(firstField)) {
+          // Case: "1H", "2P", etc. - extract the letter
+          recordType = firstField.charAt(firstField.length - 1);
+        } else if (/^[HPORL]$/.test(firstField)) {
+          // Case: "H", "P", "O", "R", "L" - use as is
+          recordType = firstField;
+        } else {
+          // Unknown format
+          this.logger.warn(`Cannot identify record type from: ${firstField}`);
+          recordType = firstField;
+        }
         
         switch(recordType) {
           case 'H': // Header
@@ -68,6 +182,8 @@ class MessageParser {
           case 'L': // Terminator
             records.push(this.parseASTMTerminator(fields));
             break;
+          default:
+            this.logger.warn(`Unknown record type: ${recordType}`);
         }
       }
 
