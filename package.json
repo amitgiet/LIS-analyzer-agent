@@ -8,7 +8,8 @@
     "dev": "nodemon src/agent.js",
     "install-service": "node scripts/install-service.js",
     "uninstall-service": "node scripts/uninstall-service.js",
-    "autodetect": "node src/autodetect/AutoDetectionManager.js --scan"
+    "autodetect": "node src/autodetect/AutoDetectionManager.js --scan",
+    "serial:basic": "node src/tools/basicSerialListener.js"
   },
   "keywords": [
     "lis",

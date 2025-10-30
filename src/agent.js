@@ -20,7 +20,7 @@ class LISAgent {
   constructor() {
     this.config = config;
     this.logger = this.setupLogger();
-    this.reader = null;
+    this.readers = [];
     this.parser = new MessageParser(this.logger);
     this.httpClient = new HttpClient(config, this.logger);
     this.queueManager = new QueueManager(config, this.logger);
@@ -58,40 +58,44 @@ class LISAgent {
 
   async start() {
     try {
-      this.logger.info('Starting LIS Client Agent...', {
-        instrumentId: this.config.instrument.id,
-        connectionType: this.config.connection.type
-      });
+      const connections = Array.isArray(this.config.connections) && this.config.connections.length > 0
+        ? this.config.connections
+        : (this.config.connection ? [this.config.connection] : []);
 
-      // Initialize connection based on type
-      if (this.config.connection.type === 'serial') {
-        this.reader = new ComReader(this.config.connection.serial, this.logger);
-      } else if (this.config.connection.type === 'tcp') {
-        this.reader = new TcpReader(this.config.connection.tcp, this.logger);
-      } else {
-        throw new Error(`Unknown connection type: ${this.config.connection.type}`);
+      if (connections.length === 0) {
+        throw new Error('No connections configured. Please define connections[] or connection.');
       }
 
-      // Setup data handler
-      this.reader.on('data', (rawData) => {
-        this.handleData(rawData);
+      this.logger.info('Starting LIS Client Agent...', {
+        connections: connections.map(c => ({ id: c.id, type: c.type, instrumentId: c.instrumentId || this.config.instrument?.id }))
       });
 
-      this.reader.on('error', (error) => {
-        this.logger.error('Reader error:', error);
-      });
+      for (const conn of connections) {
+        let reader;
+        if (conn.type === 'serial') {
+          reader = new ComReader(conn.serial, this.logger);
+        } else if (conn.type === 'tcp') {
+          reader = new TcpReader(conn.tcp, this.logger);
+        } else {
+          throw new Error(`Unknown connection type: ${conn.type}`);
+        }
 
-      this.reader.on('disconnect', () => {
-        this.logger.warn('Instrument disconnected');
-        this.emitDeviceStatus(); // Update backend with disconnection
-        this.attemptReconnect();
-      });
+        reader.on('data', (rawData) => {
+          this.handleDataWithContext(rawData, conn.instrumentId || this.config.instrument?.id, conn.id || conn.serial?.port || conn.tcp?.port);
+        });
 
-      // Start reader
-      await this.reader.connect();
-      
-      this.logger.info('Instrument connected successfully');
-      this.emitDeviceStatus(); // Update backend with connection status
+        reader.on('error', (error) => {
+          this.logger.error(`Reader error (${conn.id || conn.serial?.port || conn.tcp?.port}):`, error);
+        });
+
+        reader.on('disconnect', () => {
+          this.logger.warn(`Instrument disconnected (${conn.id || conn.serial?.port || conn.tcp?.port})`);
+        });
+
+        await reader.connect();
+        this.readers.push({ id: conn.id, instrumentId: conn.instrumentId || this.config.instrument?.id, reader });
+        this.logger.info('Instrument connected successfully', { connectionId: conn.id || conn.serial?.port || conn.tcp?.port });
+      }
 
       // Start queue processor
       this.queueManager.start(async (data) => {
@@ -106,11 +110,8 @@ class LISAgent {
       // Start processing queued items
       this.processQueue();
 
-      // Connect to backend Socket.IO for real-time updates
+      // Connect to backend Socket.IO for real-time updates (optional)
       this.connectToSocketServer();
-      
-      // Start monitoring for newly plugged devices
-      this.startPortMonitoring();
 
       this.isRunning = true;
       this.logger.info('Agent started successfully');
@@ -186,7 +187,7 @@ class LISAgent {
       port: portPath,
       status: 'connected',
       detectedAt: new Date().toISOString(),
-      instrumentId: this.config.instrument.id
+      instrumentId: null
     };
     
     // Emit to backend via Socket.IO
@@ -202,7 +203,7 @@ class LISAgent {
       port: portPath,
       status: 'disconnected',
       disconnectedAt: new Date().toISOString(),
-      instrumentId: this.config.instrument.id
+      instrumentId: null
     };
     
     // Emit to backend via Socket.IO
@@ -214,16 +215,19 @@ class LISAgent {
 
   emitDeviceStatus() {
     if (!this.socket || !this.socket.connected) return;
-    
-    const status = {
-      instrumentId: this.config.instrument.id,
-      instrumentType: this.config.instrument.type,
-      connectionType: this.config.connection.type,
-      status: this.reader && this.reader.isConnected ? 'connected' : 'disconnected',
+
+    const statuses = (this.readers || []).map(r => ({
+      instrumentId: r.instrumentId,
+      status: r.reader && r.reader.isConnected ? 'connected' : 'disconnected'
+    }));
+
+    const statusPayload = {
+      mode: 'multi',
+      instruments: statuses,
       timestamp: new Date().toISOString()
     };
-    
-    this.socket.emit('agent-status', status);
+
+    this.socket.emit('agent-status', statusPayload);
     this.logger.debug('Emitted agent status to backend');
   }
 
@@ -257,6 +261,43 @@ class LISAgent {
       // Send to server or queue
       this.sendOrQueue(payload);
 
+    } catch (error) {
+      this.logger.error('Error handling data:', error);
+    }
+  }
+
+  handleDataWithContext(rawData, instrumentId, connectionId) {
+    try {
+      this.logger.info('Received data from instrument', {
+        size: rawData.length,
+        instrumentId,
+        connectionId
+      });
+
+      const parsedData = this.parser.parse(rawData);
+      if (!parsedData) {
+        this.logger.warn('Failed to parse message');
+        return;
+      }
+
+      const patientRecord = Array.isArray(parsedData.records)
+        ? parsedData.records.find(r => r.type === 'patient')
+        : null;
+      this.logger.info('Parsed message', {
+        recordType: parsedData.recordType,
+        sampleId: parsedData.sampleId,
+        patientName: patientRecord?.name || '',
+        instrumentId,
+        connectionId
+      });
+
+      const payload = this.transformToBackendFormatWithInstrument(parsedData, instrumentId);
+      if (!payload) {
+        this.logger.warn('Failed to transform data to backend format');
+        return;
+      }
+
+      this.sendOrQueue(payload);
     } catch (error) {
       this.logger.error('Error handling data:', error);
     }
@@ -302,6 +343,14 @@ class LISAgent {
       return null;
     }
 
+    // Helper: normalize ASTM code like ^^^TSH^1 -> TSH
+    const normalizeAstmTestId = (code) => {
+      if (!code) return '';
+      const parts = String(code).split('^');
+      // Typical ASTM Universal Test ID: ^^^CODE^...
+      return parts.filter(Boolean)[0] ? parts.filter(Boolean)[0] : (parts[3] || parts[2] || code).replace(/\s+/g, '');
+    };
+
     // Transform to backend expected format
     const payload = {
       PracticePatientID: patientRecord?.practiceId || '',
@@ -311,22 +360,30 @@ class LISAgent {
       Sex: patientRecord?.sex || '',
       Orders: [{
         SpecimenID: specimenId,
-        UniversalTestID: orderRecord?.testId || '',
+        UniversalTestID: normalizeAstmTestId(orderRecord?.testId || ''),
         Priority: orderRecord?.priority || '',
         CollectionDate: headerRecord?.timestamp || new Date().toISOString().split('T')[0].replace(/-/g, ''),
         CollectionTime: new Date().toTimeString().split(' ')[0].replace(/:/g, ''),
         Results: resultRecords.map(r => ({
-          UniversalTestID: r.testId || '',
+          UniversalTestID: normalizeAstmTestId(r.testId || ''),
           ResultValue: r.value || '',
           Unit: r.unit || '',
           RefRange: r.referenceRange || '',
-          Abnormal: r.flag || '',
-          InstrumentID: this.config.instrument.id
+          Abnormal: r.flag || ''
         }))
       }]
     };
 
     this.logger.debug('Transformed ASTM payload:', { specimenId, resultCount: resultRecords.length });
+    return payload;
+  }
+
+  transformToBackendFormatWithInstrument(parsedData, instrumentId) {
+    const payload = this.transformToBackendFormat(parsedData);
+    if (!payload) return null;
+    if (payload.Orders && payload.Orders[0] && Array.isArray(payload.Orders[0].Results)) {
+      payload.Orders[0].Results = payload.Orders[0].Results.map(r => ({ ...r, InstrumentID: instrumentId }));
+    }
     return payload;
   }
 
@@ -377,8 +434,7 @@ class LISAgent {
             ResultValue: fields[5] || '',
             Unit: fields[6] || '',
             RefRange: fields[5] || '',
-            Abnormal: fields[8] || '',
-            InstrumentID: this.config.instrument.id
+            Abnormal: fields[8] || ''
           };
         })
       }]
@@ -420,14 +476,28 @@ class LISAgent {
 
   async sendHeartbeat() {
     try {
-      const status = {
-        instrumentId: this.config.instrument.id,
-        status: 'online',
-        timestamp: new Date().toISOString(),
-        queueSize: this.queueManager.size()
-      };
       const endpoint = this.config.server.endpoints?.heartbeat || '/api/instruments/heartbeat';
-      await this.httpClient.post(endpoint, status);
+      const readers = this.readers || [];
+      if (readers.length === 0) {
+        await this.httpClient.post(endpoint, {
+          instrumentId: undefined,
+          status: 'online',
+          timestamp: new Date().toISOString(),
+          queueSize: this.queueManager.size()
+        });
+        this.logger.debug('Heartbeat sent (no readers)');
+        return;
+      }
+
+      // Send one heartbeat per connection with instrumentId set (legacy-compatible)
+      for (const r of readers) {
+        await this.httpClient.post(endpoint, {
+          instrumentId: r.instrumentId,
+          status: 'online',
+          timestamp: new Date().toISOString(),
+          queueSize: this.queueManager.size()
+        });
+      }
       this.logger.debug('Heartbeat sent successfully');
     } catch (error) {
       this.logger.debug('Heartbeat failed:', error.message);

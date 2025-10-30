@@ -52,11 +52,7 @@ class ComReader extends EventEmitter {
         autoOpen: true
       });
 
-      // Setup parser for line-based reading
-      this.parser = this.port.pipe(new ReadlineParser({ 
-        delimiter: '\r\n',
-        includeDelimiter: false
-      }));
+      // For protocol handler mode we will listen to raw bytes; in legacy mode we'll also use raw 'data'
 
       this.port.on('open', () => {
         this.logger.info('COM port opened successfully:', this.config.port);
@@ -69,14 +65,9 @@ class ComReader extends EventEmitter {
           this.handleByteLevelData(data);
         });
       } else {
-        // Use line-based reading (legacy mode)
-        this.parser = this.port.pipe(new ReadlineParser({ 
-          delimiter: '\r\n',
-          includeDelimiter: false
-        }));
-        
-        this.parser.on('data', (data) => {
-          this.handleData(data.toString());
+        // Legacy mode: use raw byte stream and handle buffering ourselves
+        this.port.on('data', (data) => {
+          this.handleData(data.toString('binary'));
         });
       }
 
@@ -126,11 +117,17 @@ class ComReader extends EventEmitter {
    */
   handleData(data) {
     try {
+      this.logger.info('Serial chunk received', { length: data.length });
       // Accumulate data into buffer
       this.buffer += data;
 
-      // Check if message is complete (ETX or EOT character)
-      if (this.buffer.includes('\x03') || this.buffer.includes('\x04')) {
+      // Check if message is complete (ETX/EOT, ASTM L| terminator, or newline)
+      const hasTerminator = this.buffer.includes('\x03') ||
+        this.buffer.includes('\x04') ||
+        /\rL\|.*\r/.test(this.buffer) ||
+        this.buffer.includes('\n');
+
+      if (hasTerminator) {
         const message = this.buffer.trim();
         this.buffer = '';
 
