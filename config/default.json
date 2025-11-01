@@ -22,7 +22,7 @@
       "type": "serial",
       "instrumentId": "CLIENT_001",
       "serial": {
-        "port": "COM6",
+        "port": "COM8",
         "baudRate": 9600,
         "dataBits": 8,
         "parity": "none",
